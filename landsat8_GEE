@@ -1,0 +1,191 @@
+//////////////////////////////////////////////////////////////
+////////////////preprocessing////////////////////////////////
+/////////////////////////////////////////////////////////////
+
+// Load a raw Landsat 8 ImageCollection for 2021
+var collection = ee.ImageCollection('LANDSAT/LC08/C02/T1')
+    .filterDate('2021-01-01', '2021-12-31')
+    .filterBounds(ROI);
+
+// Create cloudfree composite with default parameters
+var composite = ee.Algorithms.Landsat.simpleComposite(collection);
+var visParams = {bands: ['B4', 'B3', 'B2'], min: 0, max: 100,};
+
+// Display composite
+//Map.addLayer(composite, visParams, 'TOA composite');
+//Map.centerObject(ROI);
+
+// Load or import the Hansen et al. forest change dataset
+var hansenImage = ee.Image('UMD/hansen/global_forest_change_2015');
+
+// Select the land/water mask
+var datamask = hansenImage.select('datamask');
+
+// Create a binary mask
+var mask = datamask.eq(1);
+
+// Create geometry for clipping
+var polypark = park.geometry()
+
+// Update the composite with the water mask + clip
+var maskedComposite = composite.updateMask(mask);
+var maskedCompositeClip = maskedComposite.clip(polypark);
+
+// display clipped composite
+Map.addLayer(maskedCompositeClip, visParams, 'TOA composite masked')
+Map.centerObject(ROI);
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////NDVI////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+// Compute NDVI
+var nir = maskedCompositeClip.select('B5');
+var red = maskedCompositeClip.select('B4');
+var ndvi_maskedComposite = nir.subtract(red).divide(nir.add(red)).rename('NDVI');
+
+// Display NDVI
+Map.centerObject(ROI);
+var ndviParams = {min: -1, max: 1, palette: ['blue', 'white', 'green']};
+Map.addLayer(ndvi_maskedComposite, ndviParams, 'NDVI image');
+
+//create classes
+var thresholds = ee.Image([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]); //Define the thresholds, 10
+var classified = ndvi_maskedComposite.gt(thresholds).reduce('sum').toInt(); //Create the classified image
+print(classified, 'Classified');
+
+//Define new visualization parameters for the classification
+var palettes = require('users/gena/packages:palettes');
+var palette = palettes.colorbrewer.RdYlGn[10]; //10 thresholds
+var classifiedParams = {min: 0, max: 11, palette: palette};
+
+//Display classified NDVI image
+Map.addLayer(classified, classifiedParams, 'Classified');
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////TASSELED CAP///////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+
+ var calculateTasseledCap = function (image){
+  var b = image.select("B2", "B3", "B4", "B5", "B6", "B7");
+  //Coefficients are only for Landsat 8 TOA, from yale paper https://yceo.yale.edu/tasseled-cap-transform-landsat-8-oli
+  var brightness_coefficents= ee.Image([0.3029, 0.2786, 0.4733, 0.5599, 0.508, 0.1872])
+  var greenness_coefficents= ee.Image([-0.2941, -0.243, -0.5424, 0.7276, 0.0713, -0.1608]);
+  var wetness_coefficents= ee.Image([0.1511, 0.1973, 0.3283, 0.3407, -0.7117, -0.4559]);
+  var fourth_coefficents= ee.Image([-0.8239, 0.0849, 0.4396, -0.058, 0.2013, -0.2773]);
+  var fifth_coefficents= ee.Image([-0.3294, 0.0557, 0.1056, 0.1855, -0.4349, 0.8085]);
+  var sixth_coefficents= ee.Image([0.1079, -0.9023, 0.4119, 0.0575, -0.0259, 0.0252]);
+  
+  var brightness = image.expression(
+            '(B * BRIGHTNESS)',
+            {
+                'B':b,
+                'BRIGHTNESS': brightness_coefficents
+                }
+            );
+  var greenness = image.expression(
+    '(B * GREENNESS)',
+            {
+                'B':b,
+                'GREENNESS': greenness_coefficents
+                }
+            );
+  var wetness = image.expression(
+    '(B * WETNESS)',
+            {
+                'B':b,
+                'WETNESS': wetness_coefficents
+                }
+            );
+  var fourth = image.expression(
+      '(B * FOURTH)',
+        {
+          'B':b,
+          'FOURTH': fourth_coefficents
+          }
+        );
+  var fifth = image.expression(
+      '(B * FIFTH)',
+        {
+          'B':b,
+          'FIFTH': fifth_coefficents
+          }
+        );
+  var sixth = image.expression(
+    '(B * SIXTH)',
+    {
+      'B':b,
+      'SIXTH': sixth_coefficents
+      }
+    );
+
+// reducers (summing)
+  brightness = brightness.reduce(ee.call("Reducer.sum"));
+  greenness = greenness.reduce(ee.call("Reducer.sum"));
+  wetness = wetness.reduce(ee.call("Reducer.sum"));
+  fourth = fourth.reduce(ee.call("Reducer.sum"));
+  fifth = fifth.reduce(ee.call("Reducer.sum"));
+  sixth = sixth.reduce(ee.call("Reducer.sum"));
+  
+  var tasseled_cap = ee.Image(brightness).addBands(greenness).addBands(wetness)
+                             .addBands(fourth)
+                             .addBands(fifth)
+                             .addBands(sixth).rename('brightness','greenness','wetness','fourth','fifth','sixth')
+  return tasseled_cap;
+}
+
+//apply
+var selectmaskedComposite= ee.ImageCollection(maskedCompositeClip);
+var landsat8_tasseled_cap = selectmaskedComposite.map(calculateTasseledCap);
+
+//display TC layers
+Map.addLayer( landsat8_tasseled_cap,{},'Landsat 8 Tasseled Cap');
+Map.addLayer( landsat8_tasseled_cap,{min: 0, max:1, bands:['brightness']},'brightness');
+Map.addLayer( landsat8_tasseled_cap,{min: 0, max:1, bands:['greenness']},'greenness');
+Map.addLayer( landsat8_tasseled_cap,{min: 0, max:1, bands:['wetness']},'wetness');
+
+//create variables for export
+var TCTbrightness = landsat8_tasseled_cap.select('brightness').mean().clip(polypark)
+var TCTgreenness = landsat8_tasseled_cap.select('grenness').mean()
+var TCTwetness = landsat8_tasseled_cap.select('wetness').mean()
+
+/////////////////////////////////////////////////////////////////////////////
+///////////////////////////EXPORT////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////
+
+//Classified NDVI export (replace with NDVI if classes not desired)
+Export.image.toDrive({
+  image: classified,
+  description: 'Landsat8MaskedComposite_NDVIClasses',
+  folder: 'GEE images',
+  region: polypark,
+  scale: 30,
+  crs: 'EPSG:2193', //NZTM2000
+  maxPixels: 1e11,
+  fileFormat: "GeoTiff"
+});
+
+//TC export, repeat for b/g/w
+Export.image.toDrive({
+  image: TCTwetness,
+  description: 'TCTwetness',
+  folder: 'GEE images',
+  region: polypark,
+  scale: 30,
+  crs: 'EPSG:2193', //NZTM2000
+  maxPixels: 1e11,
+  fileFormat: "GeoTiff"
+})
+
+//real color masked & clipped export
+Export.image.toDrive({
+  image: maskedCompositeClip,
+  description: 'Landsat8MaskedComposite_TrueColor',
+  folder: 'GEE images',
+  region: polypark,
+  scale: 30,
+  crs: 'EPSG:2193', //NZTM2000
+  maxPixels: 1e11,
+  fileFormat: "GeoTiff"
+});
